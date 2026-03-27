@@ -1,59 +1,63 @@
 # 💊 Edge AI-Gated ePRO — Asynchronous Directly Observed Therapy (aDOT)
 
-> **A privacy-first, browser-native clinical trial compliance system.** The patient's daily symptom diary is locked behind a computer vision gate that verifies the investigational product directly on the device. No video ever leaves the patient's phone.
+> **A privacy-first, browser-native clinical trial compliance system.** The patient's daily symptom diary is locked behind a computer vision gate that verifies the investigational product directly on the device. No video, no images, and no biometric data ever leaves the patient's device.
 
 ---
 
 ## Executive Summary
 
-Medication non-adherence in Decentralized Clinical Trials (DCTs) compromises study integrity and costs sponsors millions. This project enforces **Asynchronous Directly Observed Therapy (aDOT)** using a lightweight MobileNetV2 model that runs entirely in the browser via **TensorFlow.js**.
+Medication non-adherence in Decentralized Clinical Trials (DCTs) compromises study integrity and costs sponsors millions. This project enforces **Asynchronous Directly Observed Therapy (aDOT)** using a lightweight MobileNetV2 model that runs entirely in the browser via **ONNX Runtime Web (WASM)**.
 
-The classifier answers exactly one binary question: **"Is this the investigational product?"** If yes, the ePRO diary unlocks. If not, the UI halts and a `prevented_dosing_error` telemetry event is logged to the backend audit trail. No images, no video, and no facial data ever leave the device.
+The classifier answers exactly one question: **"Is this the investigational product?"** If yes, the ePRO diary unlocks. If not, the UI halts and a `prevented_dosing_error` telemetry event is logged to the backend audit trail. No images, no video, and no facial data ever leave the device.
 
 ---
 
 ## System Architecture
 
 ```
-┌───────────────────────────────────────────────────┐
-│         PATIENT DEVICE (Everything in ⬇️ is local)         │
-│                                                               │
-│  ┌───────────────────────────────────────────┐          │
-│  │  WebRTC Camera Feed (getUserMedia)        │          │
-│  │         ↓                                 │          │
-│  │  Canvas API → 224×224 ROI Crop            │          │
-│  │         ↓                                 │          │
-│  │  TensorFlow.js MobileNetV2 Inference       │          │
-│  │  (model weights served as static files)   │          │
-│  │         ↓                                 │          │
-│  │  Binary Result: IP_DETECTED / NOT_IP      │          │
-│  └───────────────────────────────────────────┘          │
-│          ↓ ONLY this crosses the network ↓                │
-└───────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────┐
+│          PATIENT DEVICE (all inference is local)    │
+│                                                     │
+│  ┌─────────────────────────────────────────────┐   │
+│  │  WebRTC Camera Feed (getUserMedia)          │   │
+│  │           ↓                                 │   │
+│  │  Canvas API → 224×224 ROI Crop              │   │
+│  │           ↓                                 │   │
+│  │  ImageNet Normalisation (mean/std)          │   │
+│  │           ↓                                 │   │
+│  │  ONNX Runtime Web — MobileNetV2 WASM        │   │
+│  │  (model.onnx served as a static file)       │   │
+│  │           ↓                                 │   │
+│  │  Softmax → class: ip / not_ip / background  │   │
+│  │           ↓                                 │   │
+│  │  Stable-frame debounce (N consecutive hits) │   │
+│  └─────────────────────────────────────────────┘   │
+│          ↓ ONLY this crosses the network ↓          │
+└─────────────────────────────────────────────────────┘
                    ↓
-  { dose_verified: true, subject_id, timestamp, confidence }
+  { event: "dose_verified", subject_id, timestamp, confidence }
   OR
   { event: "prevented_dosing_error", subject_id, timestamp }
                    ↓
-┌─────────────────────┐
+┌──────────────────────┐
 │  Node.js Telemetry   │
 │  /api/log-adherence  │  ← Audit trail for clinical coordinators
-└─────────────────────┘
+└──────────────────────┘
 ```
 
 ---
 
 ## User Flow
 
-1. Patient opens daily diary on phone browser
+1. Patient opens daily diary on phone or desktop browser
 2. **ePRO diary is locked** — cannot submit without verification
-3. Camera activates with circular ROI overlay
-4. Patient holds IP inside the target circle
-5. MobileNetV2 classifies continuously at ~30fps **locally**
-6. `IP_DETECTED` with confidence ≥90% → diary **unlocks** ✔️
+3. Camera activates with circular ROI overlay (blurred outside, sharp inside)
+4. Patient holds the IP inside the target circle
+5. MobileNetV2 classifies continuously **locally in the browser**
+6. `ip` class with confidence ≥ 90% held for 10 consecutive frames → diary **unlocks** ✔️
 7. Patient completes symptom questions and submits
-8. Cryptographic adherence token sent to backend — **no image, no video**
-9. If wrong object held: diary stays locked, `prevented_dosing_error` logged ❌
+8. Adherence event sent to backend — **no image, no video, no biometric data**
+9. Wrong object held: diary stays locked, `prevented_dosing_error` logged ❌
 
 ---
 
@@ -61,12 +65,12 @@ The classifier answers exactly one binary question: **"Is this the investigation
 
 | Layer | Technology | Reason |
 |-------|------------|--------|
-| Frontend | Next.js (React) | ePRO state management, component-based diary |
-| Edge AI | TensorFlow.js (TFJS) | In-browser inference, zero data transfer |
-| Model | MobileNetV2 (binary) | <5MB, 30fps on mobile CPU |
-| Media | WebRTC getUserMedia + Canvas | ROI cropping without server round-trip |
-| Backend | Node.js / Express | Lightweight telemetry endpoint |
-| Training | Python + Keras/TF | Trains on your IP photos, exports to TFJS |
+| Frontend | Next.js 16 (React) | ePRO state management, component-based diary |
+| Edge AI | ONNX Runtime Web (WASM) | In-browser inference, no server round-trip, no WebGL dependency |
+| Model | MobileNetV2 (3-class) | < 15 MB ONNX, fast on CPU/WASM |
+| Training | PyTorch + torchvision | Fine-tunes on your IP photos, exports to ONNX |
+| Media | WebRTC getUserMedia + Canvas | ROI crop + ImageNet normalisation client-side |
+| Backend | Node.js / Express | Lightweight telemetry endpoint only |
 | Logging | SDTM-compatible JSONL | EX domain audit trail |
 
 ---
@@ -75,60 +79,80 @@ The classifier answers exactly one binary question: **"Is this the investigation
 
 ```
 medication-id-copilot/
-├── training/                    # Python — run once to create the model
-│   ├── train.py                 # MobileNetV2 fine-tune + TFJS export
+├── training/                    # Python — run once to produce model.onnx
+│   ├── train.py                 # MobileNetV2 fine-tune (PyTorch) + ONNX export
 │   ├── capture_tool.py          # Webcam tool to collect your own IP photos
-│   ├── requirements.txt         # tensorflow, tensorflowjs, opencv-python
+│   ├── requirements.txt
 │   └── data/
-│       ├── ip/                  # Your photos of the investigational product
-│       └── not_ip/              # Background / wrong pills / hand / empty
+│       ├── ip/                  # ~150+ photos of the investigational product
+│       ├── not_ip/              # ~150+ photos: background, wrong pills, hand, empty
+│       └── background/          # Plain background / empty circle shots
 ├── frontend/                    # Next.js ePRO application
 │   ├── public/
-│   │   └── model/               # ← Drop your exported TFJS model here
-│   │       ├── model.json
-│   │       └── group1-shard1of1.bin
+│   │   └── model/               # ← Drop your exported model files here
+│   │       ├── model.onnx       # Exported from training/train.py
+│   │       └── class_map.json   # { "idx_to_class": { "0": "background", ... } }
 │   ├── components/
-│   │   ├── PillGate.jsx         # Camera + TFJS inference gate component
+│   │   ├── PillGate.jsx         # Camera + ONNX RT inference gate component
 │   │   ├── DiaryForm.jsx        # Locked symptom diary (unlocks after gate)
 │   │   └── ProgressBar.jsx
 │   ├── pages/
-│   │   └── index.jsx            # Main ePRO page
-│   ├── package.json
-│   └── .env.local.example
+│   │   └── index.jsx
+│   └── styles/
+│       └── PillGate.module.css
 ├── backend/                     # Node.js telemetry server
 │   ├── server.js                # Express: /api/log-adherence
 │   ├── sdtm_logger.js           # SDTM EX domain JSONL writer
 │   └── package.json
 ├── docs/
 │   ├── architecture.md
-│   ├── training_guide.md        # Step-by-step: collect photos → train → deploy
-│   └── privacy_compliance.md    # HIPAA/GDPR zero-data-transfer rationale
+│   ├── training_guide.md
+│   └── privacy_compliance.md
 └── README.md
 ```
 
 ---
 
-## Training Your Own Model
+## Quickstart
 
-See [`docs/training_guide.md`](docs/training_guide.md) for the full step-by-step.
-
-**TL;DR:**
 ```bash
+# 1. Train the model (GPU recommended — RTX 2080+ or equivalent)
 cd training/
 pip install -r requirements.txt
 
-# Step 1: Collect photos of your IP (or use capture_tool.py)
-# training/data/ip/       ← ~150 photos of the investigational product
-# training/data/not_ip/   ← ~150 photos of background, hand, wrong pills
+# Collect photos of your IP:
+# training/data/ip/         ← investigational product
+# training/data/not_ip/     ← other pills, background, hand
+# training/data/background/ ← empty scene
 
-# Step 2: Train + export to TensorFlow.js
 python train.py
-# Outputs: frontend/public/model/model.json + .bin shards
+# Outputs: training/model.onnx + frontend/public/model/class_map.json
 
-# Step 3: Start the app
-cd ../frontend && npm install && npm run dev
-cd ../backend  && npm install && node server.js
+# Copy model to frontend
+copy model.onnx ..\frontend\public\model\model.onnx
+
+# 2. Start the frontend
+cd ../frontend
+npm install
+npm run dev        # http://localhost:3000
+
+# 3. Start the backend (separate terminal)
+cd ../backend
+npm install
+node server.js     # http://localhost:3001
 ```
+
+---
+
+## Model Training Notes
+
+- **Architecture:** MobileNetV2 pretrained on ImageNet, last 20 layers fine-tuned
+- **Classes:** `ip` / `not_ip` / `background`
+- **Augmentation:** Random crop, flip, rotation, brightness/contrast only
+  - Saturation and hue jitter deliberately excluded to preserve colour discrimination
+- **Two-phase training:** Head-only (40 epochs) → fine-tune last 20 layers (40 epochs, early stopping)
+- **Inference:** ONNX exported with `opset_version=12`, loaded via `onnxruntime-web` WASM
+- **Normalisation:** ImageNet mean/std applied client-side before inference
 
 ---
 
@@ -137,11 +161,11 @@ cd ../backend  && npm install && node server.js
 | Concern | This Architecture |
 |---------|------------------|
 | Patient video storage | ❌ Never stored — inference is local |
-| PII transmission | ❌ Only subject_id + outcome hash sent |
+| PII transmission | ❌ Only subject_id + outcome event sent |
 | HIPAA compliance | ✅ No PHI transmitted or stored server-side |
-| GDPR Article 25 | ✅ Privacy by design — data minimization |
+| GDPR Article 25 | ✅ Privacy by design — data minimisation |
 | Audit trail | ✅ SDTM EX-compatible JSONL on backend |
-| Regulatory grade | Portfolio/research prototype. Production use requires 21 CFR Part 11 validation. |
+| Regulatory grade | Portfolio / research prototype |
 
 ---
 
@@ -152,4 +176,5 @@ cd ../backend  && npm install && node server.js
 ---
 
 ## License
+
 MIT

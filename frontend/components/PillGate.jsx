@@ -1,24 +1,93 @@
 import { useEffect, useRef, useState } from "react";
-import * as tf from "@tensorflow/tfjs";
+import * as ort from "onnxruntime-web";
 import styles from "../styles/PillGate.module.css";
 
-const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:3001";
-const MODEL_URL = "/model/model.json";
-const META_URL = "/model/class_map.json";
+const API_BASE  = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:3001";
+const MODEL_URL = "/model/model.onnx";
+const META_URL  = "/model/class_map.json";
 
-export default function PillGate({ subjectId, onVerified, disabled }) {
-  const videoRef = useRef(null);
-  const cropCanvasRef = useRef(null);
-  const overlayCanvasRef = useRef(null);
-  const modelRef = useRef(null);
-  const metaRef = useRef(null);
-  const rafRef = useRef(null);
-  const streamRef = useRef(null);
-  const stableIpRef = useRef(0);
-  const lastLoggedRef = useRef("");
+// ImageNet normalization constants (required for PyTorch MobileNetV2)
+const MEAN = [0.485, 0.456, 0.406];
+const STD  = [0.229, 0.224, 0.225];
 
-  const [status, setStatus] = useState("loading");
-  const [message, setMessage] = useState("Loading local model...");
+// Confidence thresholds per class
+const THRESHOLDS = { background: 0.70, not_ip: 0.85, ip: 0.90 };
+// Number of consecutive confident frames required to commit a state
+const STABLE     = { background: 6,    not_ip: 8,    ip: 10    };
+
+function preprocessCanvas(canvas) {
+  const ctx     = canvas.getContext("2d");
+  const { data } = ctx.getImageData(0, 0, 224, 224);
+  const float32 = new Float32Array(3 * 224 * 224);
+
+  // Convert HWC RGBA uint8 → CHW float32 with ImageNet normalization
+  for (let i = 0; i < 224 * 224; i++) {
+    float32[0 * 224 * 224 + i] = (data[i * 4 + 0] / 255 - MEAN[0]) / STD[0]; // R
+    float32[1 * 224 * 224 + i] = (data[i * 4 + 1] / 255 - MEAN[1]) / STD[1]; // G
+    float32[2 * 224 * 224 + i] = (data[i * 4 + 2] / 255 - MEAN[2]) / STD[2]; // B
+  }
+
+  return new ort.Tensor("float32", float32, [1, 3, 224, 224]);
+}
+
+function softmax(logits) {
+  const max  = Math.max(...logits);
+  const exps = logits.map((v) => Math.exp(v - max));
+  const sum  = exps.reduce((a, b) => a + b, 0);
+  return exps.map((v) => v / sum);
+}
+
+// Optional pixel-level hue gate to guard against same-shape/different-color confusion
+function getRoiDominantColor(canvas) {
+  const ctx    = canvas.getContext("2d");
+  const pixels = ctx.getImageData(80, 80, 64, 64).data; // sample center 64×64 patch
+  let rSum = 0, gSum = 0, bSum = 0, count = 0;
+
+  for (let i = 0; i < pixels.length; i += 4) {
+    rSum += pixels[i];
+    gSum += pixels[i + 1];
+    bSum += pixels[i + 2];
+    count++;
+  }
+
+  const r = rSum / count, g = gSum / count, b = bSum / count;
+  if (r > g + 30 && r > b + 30) return "red";
+  if (b > r + 30 && b > g + 10) return "blue";
+  if (g > r + 20 && g > b + 20) return "green";
+  if (r > 180 && g > 180 && b > 180) return "white";
+  if (r > 180 && g > 150 && b < 100) return "yellow";
+  return "other";
+}
+
+/**
+ * PillGate — camera-based investigational product verification gate.
+ *
+ * Props:
+ *   subjectId  {string}  — trial subject identifier, included in all log events
+ *   onVerified {fn}      — called with { predictedClass, confidence } on successful verification
+ *   disabled   {bool}    — pauses inference loop when true
+ *   ipColor    {string}  — optional dominant color hint ("blue"|"red"|"white"|...)
+ *                          enables pixel-level hue gate as a secondary check
+ */
+export default function PillGate({ subjectId, onVerified, disabled, ipColor = null }) {
+  const videoRef         = useRef(null); // blurred background video
+  const videoSharpRef    = useRef(null); // sharp foreground video (CSS-clipped circle)
+  const cropCanvasRef    = useRef(null); // hidden 224×224 canvas for inference
+  const overlayCanvasRef = useRef(null); // visible canvas — draws glowing ring only
+  const sessionRef       = useRef(null); // ONNX InferenceSession
+  const metaRef          = useRef(null); // class_map.json { idx_to_class }
+  const rafRef           = useRef(null); // requestAnimationFrame handle
+  const streamRef        = useRef(null); // MediaStream reference
+  const lastLoggedRef    = useRef("");   // deduplicates logEvent calls
+  const currentStatusRef = useRef("idle"); // committed display state
+
+  // Per-class stable frame counters — all three debounce independently
+  const stableIpRef         = useRef(0);
+  const stableBackgroundRef = useRef(0);
+  const stableWrongRef      = useRef(0);
+
+  const [status,     setStatus]     = useState("loading");
+  const [message,    setMessage]    = useState("Loading local model...");
   const [confidence, setConfidence] = useState(0);
 
   useEffect(() => {
@@ -26,18 +95,31 @@ export default function PillGate({ subjectId, onVerified, disabled }) {
 
     async function init() {
       try {
-        modelRef.current = await tf.loadLayersModel(MODEL_URL);
+        // Load ONNX model (WASM backend — works in all browsers, no WebGL required)
+        sessionRef.current = await ort.InferenceSession.create(MODEL_URL, {
+          executionProviders: ["wasm"]
+        });
+
+        // Load class index map
         const metaRes = await fetch(META_URL);
         metaRef.current = await metaRes.json();
 
+        // Start webcam stream
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: "environment", width: { ideal: 1280 } },
+          video: {
+            facingMode: "user",
+            width:  { ideal: 1280, max: 1920 },
+            height: { ideal: 720,  max: 1080 }
+          },
           audio: false
         });
         streamRef.current = stream;
 
+        // Attach stream to both video elements (blurred + sharp)
+        if (videoRef.current)      videoRef.current.srcObject      = stream;
+        if (videoSharpRef.current) videoSharpRef.current.srcObject = stream;
+
         if (videoRef.current) {
-          videoRef.current.srcObject = stream;
           await new Promise((resolve) =>
             videoRef.current.addEventListener("loadeddata", resolve, { once: true })
           );
@@ -59,14 +141,13 @@ export default function PillGate({ subjectId, onVerified, disabled }) {
     return () => {
       cancelled = true;
       cancelAnimationFrame(rafRef.current);
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((t) => t.stop());
-      }
+      streamRef.current?.getTracks().forEach((t) => t.stop());
     };
   }, []);
 
   async function logEvent(event, payload = {}) {
     try {
+      // Deduplicate repeated events (e.g. wrong pill held for multiple frames)
       const key = `${event}:${payload.predicted_class || ""}`;
       if (event === "prevented_dosing_error" && lastLoggedRef.current === key) return;
       lastLoggedRef.current = key;
@@ -81,120 +162,159 @@ export default function PillGate({ subjectId, onVerified, disabled }) {
           ...payload
         })
       });
-    } catch { }
+    } catch { /* backend offline during dev — non-fatal */ }
   }
 
   function drawOverlay(color = "#9ca3af") {
     const canvas = overlayCanvasRef.current;
-    const video = videoRef.current;
-    if (!canvas || !video) return;
+    if (!canvas) return;
 
-    const rect = video.getBoundingClientRect();
-    canvas.width = rect.width * window.devicePixelRatio;
+    const rect    = canvas.parentElement.getBoundingClientRect();
+    canvas.width  = rect.width  * window.devicePixelRatio;
     canvas.height = rect.height * window.devicePixelRatio;
 
     const ctx = canvas.getContext("2d");
     ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
 
-    const w = rect.width;
-    const h = rect.height;
-    const radius = Math.min(w, h) * 0.28;
+    const w  = rect.width;
+    const h  = rect.height;
     const cx = w / 2;
     const cy = h / 2;
 
+    // Radius matches CSS clip-path: circle(28%) which uses the diagonal
+    const radius = 0.28 * (Math.sqrt(w * w + h * h) / Math.SQRT2);
+
     ctx.clearRect(0, 0, w, h);
-    ctx.fillStyle = "rgba(0,0,0,0.45)";
-    ctx.fillRect(0, 0, w, h);
 
-    ctx.globalCompositeOperation = "destination-out";
-    ctx.beginPath();
-    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-    ctx.fill();
-
-    ctx.globalCompositeOperation = "source-over";
+    // Glowing ring only — blur is handled by CSS via the two video elements
     ctx.strokeStyle = color;
-    ctx.lineWidth = 4;
+    ctx.lineWidth   = 4;
+    ctx.shadowColor = color;
+    ctx.shadowBlur  = 10;
     ctx.beginPath();
     ctx.arc(cx, cy, radius, 0, Math.PI * 2);
     ctx.stroke();
+    ctx.shadowBlur = 0;
   }
 
   function tick() {
     rafRef.current = requestAnimationFrame(async () => {
-      const video = videoRef.current;
+      const video      = videoRef.current;
       const cropCanvas = cropCanvasRef.current;
-      const model = modelRef.current;
-      const meta = metaRef.current;
+      const session    = sessionRef.current;
+      const meta       = metaRef.current;
 
-      if (!video || !cropCanvas || !model || !meta || disabled) {
+      if (!video || !cropCanvas || !session || !meta || disabled) {
         tick();
         return;
       }
 
-      const ctx = cropCanvas.getContext("2d");
-      cropCanvas.width = 224;
+      // Crop square ROI from the centre of the live video frame
+      const ctx     = cropCanvas.getContext("2d");
+      cropCanvas.width  = 224;
       cropCanvas.height = 224;
 
-      const vw = video.videoWidth;
-      const vh = video.videoHeight;
+      const vw      = video.videoWidth;
+      const vh      = video.videoHeight;
       const roiSize = Math.floor(Math.min(vw, vh) * 0.55);
-      const sx = (vw - roiSize) / 2;
-      const sy = (vh - roiSize) / 2;
-
+      const sx      = (vw - roiSize) / 2;
+      const sy      = (vh - roiSize) / 2;
       ctx.drawImage(video, sx, sy, roiSize, roiSize, 0, 0, 224, 224);
 
-      const tensor = tf.browser
-        .fromPixels(cropCanvas)
-        .toFloat()
-        .div(255)
-        .expandDims(0);
+      // Run ONNX inference
+      const inputTensor = preprocessCanvas(cropCanvas);
+      const feeds       = { [session.inputNames[0]]: inputTensor };
+      const results     = await session.run(feeds);
+      const logits      = Array.from(results[session.outputNames[0]].data);
+      const probs       = softmax(logits); // model outputs raw logits, not probabilities
 
-      const pred = model.predict(tensor);
-      const data = await pred.data();
-
-      tensor.dispose();
-      pred.dispose();
-
-      const probs = Array.from(data);
-      const maxProb = Math.max(...probs);
-      const predIdx = probs.indexOf(maxProb);
-      const predictedClass = meta.idx_to_class[String(predIdx)] || meta.idx_to_class[predIdx];
+      const maxProb        = Math.max(...probs);
+      const predIdx        = probs.indexOf(maxProb);
+      const predictedClass = meta.idx_to_class[String(predIdx)];
 
       setConfidence(Math.round(maxProb * 100));
 
-      if (predictedClass === "background" && maxProb >= 0.7) {
-        stableIpRef.current = 0;
+      // Optional hue gate — overrides "ip" prediction if pixel color doesn't match
+      let classVote = predictedClass;
+      if (ipColor && predictedClass === "ip") {
+        const detectedColor = getRoiDominantColor(cropCanvas);
+        if (detectedColor !== ipColor) classVote = "not_ip";
+      }
+
+      // Increment the winning counter, slowly decay the others
+      const confident = maxProb >= (THRESHOLDS[classVote] ?? 0.90);
+
+      if (confident && classVote === "ip") {
+        stableIpRef.current         += 1;
+        stableBackgroundRef.current  = Math.max(0, stableBackgroundRef.current - 1);
+        stableWrongRef.current       = Math.max(0, stableWrongRef.current - 1);
+      } else if (confident && classVote === "background") {
+        stableBackgroundRef.current += 1;
+        stableIpRef.current          = Math.max(0, stableIpRef.current - 1);
+        stableWrongRef.current       = Math.max(0, stableWrongRef.current - 1);
+      } else if (confident && classVote === "not_ip") {
+        stableWrongRef.current      += 1;
+        stableIpRef.current          = Math.max(0, stableIpRef.current - 1);
+        stableBackgroundRef.current  = Math.max(0, stableBackgroundRef.current - 1);
+      } else {
+        // Below confidence threshold — decay all counters slowly
+        stableIpRef.current         = Math.max(0, stableIpRef.current - 1);
+        stableBackgroundRef.current = Math.max(0, stableBackgroundRef.current - 1);
+        stableWrongRef.current      = Math.max(0, stableWrongRef.current - 1);
+      }
+
+      // Commit state only when a counter crosses its threshold
+      if (stableIpRef.current >= STABLE.ip) {
+        currentStatusRef.current = "good";
+      } else if (stableWrongRef.current >= STABLE.not_ip) {
+        currentStatusRef.current = "wrong";
+      } else if (stableBackgroundRef.current >= STABLE.background) {
+        currentStatusRef.current = "idle";
+      } else {
+        currentStatusRef.current = "analyzing";
+      }
+
+      const committed = currentStatusRef.current;
+
+      const overlayColor = {
+        good:      "#22c55e",
+        wrong:     "#ef4444",
+        idle:      "#9ca3af",
+        analyzing: "#f59e0b"
+      }[committed];
+
+      // Ring redrawn every frame — no stale state
+      drawOverlay(overlayColor);
+
+      if (committed === "idle") {
         setStatus("idle");
-        setMessage("Please place the pill inside the circle.");
-        drawOverlay("#9ca3af");
-      } else if (predictedClass === "not_ip" && maxProb >= 0.85) {
-        stableIpRef.current = 0;
+        setMessage("Place the pill inside the circle.");
+
+      } else if (committed === "wrong") {
         setStatus("wrong");
         setMessage("This is not the correct pill.");
-        drawOverlay("#ef4444");
         await logEvent("prevented_dosing_error", {
           predicted_class: "not_ip",
           confidence: Number(maxProb.toFixed(4))
         });
-      } else if (predictedClass === "ip" && maxProb >= 0.9) {
-        stableIpRef.current += 1;
-        setStatus("good");
-        setMessage(`Correct pill detected. Hold steady... ${stableIpRef.current}/8`);
-        drawOverlay("#22c55e");
 
-        if (stableIpRef.current >= 8) {
+      } else if (committed === "good") {
+        const progress = Math.min(stableIpRef.current, STABLE.ip);
+        setStatus("good");
+        setMessage(`Correct pill detected. Hold steady... ${progress}/${STABLE.ip}`);
+
+        if (stableIpRef.current >= STABLE.ip) {
           setMessage("Correct pill confirmed. Unlocking...");
           await onVerified({
             predictedClass: "ip",
             confidence: Number(maxProb.toFixed(4))
           });
-          return;
+          return; // stop the loop — diary is unlocked
         }
+
       } else {
-        stableIpRef.current = 0;
         setStatus("analyzing");
-        setMessage("Pill detected. Analyzing...");
-        drawOverlay("#f59e0b");
+        setMessage("Analyzing...");
       }
 
       tick();
@@ -211,46 +331,42 @@ export default function PillGate({ subjectId, onVerified, disabled }) {
         </p>
       </div>
 
-      <div
-        className={`${styles.cameraCard} ${status === "wrong" ? styles.shake : ""
-          }`}
-      >
-        <video ref={videoRef} autoPlay playsInline muted className={styles.video} />
+      <div className={`${styles.cameraCard} ${status === "wrong" ? styles.shake : ""}`}>
+
+        {/* Layer 1 — blurred background: CSS filter on native video, no canvas */}
+        <video ref={videoRef} autoPlay playsInline muted
+          className={`${styles.video} ${styles.videoBlurred}`} />
+
+        {/* Layer 2 — sharp foreground: same stream, CSS clip-path cuts the circle */}
+        <video ref={videoSharpRef} autoPlay playsInline muted
+          className={`${styles.video} ${styles.videoSharp}`} />
+
+        {/* Layer 3 — glowing ring: canvas draws stroke only, no video pixels */}
         <canvas ref={overlayCanvasRef} className={styles.overlayCanvas} />
-        <div
-          className={`${styles.statusPill} ${status === "good"
-              ? styles.green
-              : status === "wrong"
-                ? styles.red
-                : status === "analyzing"
-                  ? styles.amber
-                  : styles.grey
-            }`}
-        >
-          {status === "good"
-            ? "Correct pill"
-            : status === "wrong"
-              ? "Wrong pill"
-              : status === "analyzing"
-                ? "Analyzing"
-                : "Waiting"}
+
+        <div className={`${styles.statusPill} ${
+          status === "good"      ? styles.green  :
+          status === "wrong"     ? styles.red    :
+          status === "analyzing" ? styles.amber  : styles.grey
+        }`}>
+          {status === "good"      ? "Correct pill" :
+           status === "wrong"     ? "Wrong pill"   :
+           status === "analyzing" ? "Analyzing"    : "Waiting"}
         </div>
       </div>
 
+      {/* Hidden crop canvas used for inference only */}
       <canvas ref={cropCanvasRef} style={{ display: "none" }} />
 
       <div className={styles.feedbackCard}>
         <p className={styles.message}>{message}</p>
         <div className={styles.confidenceTrack}>
           <div
-            className={`${styles.confidenceFill} ${status === "good"
-                ? styles.greenFill
-                : status === "wrong"
-                  ? styles.redFill
-                  : status === "analyzing"
-                    ? styles.amberFill
-                    : styles.greyFill
-              }`}
+            className={`${styles.confidenceFill} ${
+              status === "good"      ? styles.greenFill :
+              status === "wrong"     ? styles.redFill   :
+              status === "analyzing" ? styles.amberFill : styles.greyFill
+            }`}
             style={{ width: `${confidence}%` }}
           />
         </div>
