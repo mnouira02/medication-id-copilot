@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Medication ID Copilot</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app-container">
+    <header>
+      <h1>💊 Medication ID Copilot</h1>
+      <p class="subtitle">Safe pill identification powered by NIH data</p>
+    </header>
+
+    <!-- Phase 1: Camera Capture with ROI Overlay -->
+    <section id="capture-section">
+      <div class="camera-wrapper">
+        <video id="video" autoplay playsinline></video>
+        <canvas id="roi-overlay"></canvas>
+        <div class="roi-box" id="roi-box">
+          <span class="roi-label">Place pill here</span>
+        </div>
+      </div>
+      <canvas id="capture-canvas" style="display:none;"></canvas>
+      <button id="capture-btn" class="btn-primary">📸 Capture Pill</button>
+    </section>
+
+    <!-- Phase 2-5: Copilot Chat Interface -->
+    <section id="chat-section" style="display:none;">
+      <div id="chat-log" class="chat-log"></div>
+
+      <!-- Imprint Input (Phase 3 HITL) -->
+      <div id="imprint-input" class="input-row" style="display:none;">
+        <input type="text" id="imprint-field" placeholder="Type pill imprint (e.g. M365)" maxlength="20" />
+        <button id="submit-imprint" class="btn-primary">Submit</button>
+      </div>
+    </section>
+
+    <footer>
+      <p>⚠️ Not a medical device. Always consult a licensed pharmacist.</p>
+    </footer>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
