@@ -1,0 +1,49 @@
+{
+  "questionnaire": "SMAQ",
+  "title": "Simplified Medication Adherence Questionnaire",
+  "reference": "Knobel et al. (2002), adapted for clinical trial ePRO",
+  "questions": [
+    {
+      "id": "SMAQ1",
+      "text": "Do you ever forget to take your medicine?",
+      "type": "boolean",
+      "options": ["Yes", "No"],
+      "sdtm_test": "SMAQ1"
+    },
+    {
+      "id": "SMAQ2",
+      "text": "Are you careless at times about taking your medicine?",
+      "type": "boolean",
+      "options": ["Yes", "No"],
+      "sdtm_test": "SMAQ2"
+    },
+    {
+      "id": "SMAQ3",
+      "text": "When you feel better, do you sometimes stop taking your medicine?",
+      "type": "boolean",
+      "options": ["Yes", "No"],
+      "sdtm_test": "SMAQ3"
+    },
+    {
+      "id": "SMAQ4",
+      "text": "Sometimes if you feel worse when you take the medicine, do you stop taking it?",
+      "type": "boolean",
+      "options": ["Yes", "No"],
+      "sdtm_test": "SMAQ4"
+    },
+    {
+      "id": "SMAQ5",
+      "text": "In the past week, how many days did you not take your medicine?",
+      "type": "scale",
+      "options": ["0", "1", "2", "3", "4", "5", "6", "7"],
+      "sdtm_test": "SMAQ5"
+    },
+    {
+      "id": "SMAQ6",
+      "text": "Since your last visit, have you taken less than 90% of your prescribed doses?",
+      "type": "boolean",
+      "options": ["Yes", "No"],
+      "sdtm_test": "SMAQ6"
+    }
+  ]
+}

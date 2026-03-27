@@ -1,0 +1,26 @@
+{
+  "trial_id": "TRIAL-001",
+  "trial_name": "Demo Compliance Trial",
+  "visit": "Week 4",
+  "subject_id": "SUBJ-042",
+  "expected_pills": [
+    {
+      "id": "pill_001",
+      "name": "Atorvastatin 20mg",
+      "ndc": "00071-0155",
+      "color": "white",
+      "shape": "oval",
+      "imprint": "PD 155 20"
+    },
+    {
+      "id": "placebo",
+      "name": "Placebo",
+      "ndc": "00000-0000",
+      "color": "white",
+      "shape": "round",
+      "imprint": "PBO"
+    }
+  ],
+  "questionnaire_id": "SMAQ",
+  "questions_file": "data/smaq_questions.json"
+}

@@ -3,45 +3,62 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Medication ID Copilot</title>
+  <title>Clinical Trial — Medication Compliance</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <div class="app-container">
     <header>
-      <h1>💊 Medication ID Copilot</h1>
-      <p class="subtitle">Safe pill identification powered by NIH data</p>
+      <div class="trial-badge">TRIAL-001 · Week 4 · SUBJ-042</div>
+      <h1>💊 Medication Compliance</h1>
+      <div class="progress-bar-wrapper">
+        <div class="progress-bar" id="progress-bar"></div>
+      </div>
+      <p class="progress-label" id="progress-label">Step 1 of 3</p>
     </header>
 
-    <!-- Phase 1: Camera Capture with ROI Overlay -->
-    <section id="capture-section">
+    <!-- STEP 1: Questionnaire -->
+    <section id="step-questionnaire" class="step active">
+      <h2 class="step-title">📋 Adherence Questionnaire</h2>
+      <div id="question-card" class="question-card">
+        <p id="question-text" class="question-text"></p>
+        <div id="answer-options" class="answer-options"></div>
+      </div>
+      <div class="question-nav">
+        <span id="question-counter" class="question-counter"></span>
+      </div>
+    </section>
+
+    <!-- STEP 2: Pill Verification -->
+    <section id="step-verification" class="step">
+      <h2 class="step-title">🔬 Pill Verification</h2>
+      <p class="step-subtitle">Place your medication inside the box and capture.</p>
       <div class="camera-wrapper">
         <video id="video" autoplay playsinline></video>
-        <canvas id="roi-overlay"></canvas>
-        <div class="roi-box" id="roi-box">
+        <div class="roi-box">
           <span class="roi-label">Place pill here</span>
         </div>
       </div>
       <canvas id="capture-canvas" style="display:none;"></canvas>
-      <button id="capture-btn" class="btn-primary">📸 Capture Pill</button>
+      <button id="capture-btn" class="btn-primary">📸 Verify Pill</button>
+      <div id="verification-result" class="verification-result" style="display:none;"></div>
+      <button id="confirm-btn" class="btn-confirm" style="display:none;">✅ I have taken my medication</button>
     </section>
 
-    <!-- Phase 2-5: Copilot Chat Interface -->
-    <section id="chat-section" style="display:none;">
-      <div id="chat-log" class="chat-log"></div>
-
-      <!-- Imprint Input (Phase 3 HITL) -->
-      <div id="imprint-input" class="input-row" style="display:none;">
-        <input type="text" id="imprint-field" placeholder="Type pill imprint (e.g. M365)" maxlength="20" />
-        <button id="submit-imprint" class="btn-primary">Submit</button>
+    <!-- STEP 3: Complete -->
+    <section id="step-complete" class="step">
+      <div class="complete-card">
+        <div class="complete-icon">✅</div>
+        <h2>Visit Complete</h2>
+        <p>Your medication intake has been verified and recorded. Thank you for your participation.</p>
+        <div class="sdtm-note">Data logged to SDTM EX + QS domains</div>
       </div>
     </section>
 
     <footer>
-      <p>⚠️ Not a medical device. Always consult a licensed pharmacist.</p>
+      <p>⚠️ For research use only. Not a certified medical device.</p>
     </footer>
   </div>
-
   <script src="app.js"></script>
 </body>
 </html>
