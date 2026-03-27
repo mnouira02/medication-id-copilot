@@ -1,46 +1,33 @@
 import { useEffect, useRef, useState } from "react";
-import * as ort from "onnxruntime-web";
+import * as tf from "@tensorflow/tfjs";
 import styles from "../styles/PillGate.module.css";
 
 const API_BASE  = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:3001";
-const MODEL_URL = "/model/model.onnx";
+const MODEL_URL = "/model/model.json"; // TensorFlow.js LayersModel (Keras export)
 const META_URL  = "/model/class_map.json";
 
-// ImageNet normalization constants (required for PyTorch MobileNetV2)
-const MEAN = [0.485, 0.456, 0.406];
-const STD  = [0.229, 0.224, 0.225];
-
-// Confidence thresholds per class
+// Confidence thresholds per class — must match training/train.py meta export
 const THRESHOLDS = { background: 0.70, not_ip: 0.85, ip: 0.90 };
-// Number of consecutive confident frames required to commit a state
+// Consecutive confident frames required before committing a state change
 const STABLE     = { background: 6,    not_ip: 8,    ip: 10    };
 
-function preprocessCanvas(canvas) {
-  const ctx     = canvas.getContext("2d");
-  const { data } = ctx.getImageData(0, 0, 224, 224);
-  const float32 = new Float32Array(3 * 224 * 224);
-
-  // Convert HWC RGBA uint8 → CHW float32 with ImageNet normalization
-  for (let i = 0; i < 224 * 224; i++) {
-    float32[0 * 224 * 224 + i] = (data[i * 4 + 0] / 255 - MEAN[0]) / STD[0]; // R
-    float32[1 * 224 * 224 + i] = (data[i * 4 + 1] / 255 - MEAN[1]) / STD[1]; // G
-    float32[2 * 224 * 224 + i] = (data[i * 4 + 2] / 255 - MEAN[2]) / STD[2]; // B
-  }
-
-  return new ort.Tensor("float32", float32, [1, 3, 224, 224]);
+/**
+ * Crops a 224x224 canvas to a normalised [1,224,224,3] float32 tensor.
+ * Normalisation: pixel / 255 only — matches Keras ImageDataGenerator rescale=1/255.
+ * No ImageNet mean/std subtraction (that would be for PyTorch pretrained pipelines).
+ */
+function canvasToTensor(canvas) {
+  return tf.tidy(() => {
+    const imageTensor = tf.browser.fromPixels(canvas);          // [224,224,3] uint8
+    const floatTensor = imageTensor.toFloat().div(tf.scalar(255)); // [224,224,3] 0-1
+    return floatTensor.expandDims(0);                            // [1,224,224,3]
+  });
 }
 
-function softmax(logits) {
-  const max  = Math.max(...logits);
-  const exps = logits.map((v) => Math.exp(v - max));
-  const sum  = exps.reduce((a, b) => a + b, 0);
-  return exps.map((v) => v / sum);
-}
-
-// Optional pixel-level hue gate to guard against same-shape/different-color confusion
+// Optional pixel-level hue gate — secondary colour check on top of CNN prediction
 function getRoiDominantColor(canvas) {
   const ctx    = canvas.getContext("2d");
-  const pixels = ctx.getImageData(80, 80, 64, 64).data; // sample center 64×64 patch
+  const pixels = ctx.getImageData(80, 80, 64, 64).data;
   let rSum = 0, gSum = 0, bSum = 0, count = 0;
 
   for (let i = 0; i < pixels.length; i += 4) {
@@ -64,24 +51,24 @@ function getRoiDominantColor(canvas) {
  *
  * Props:
  *   subjectId  {string}  — trial subject identifier, included in all log events
- *   onVerified {fn}      — called with { predictedClass, confidence } on successful verification
+ *   onVerified {fn}      — called with { predictedClass, confidence } on success
  *   disabled   {bool}    — pauses inference loop when true
  *   ipColor    {string}  — optional dominant color hint ("blue"|"red"|"white"|...)
  *                          enables pixel-level hue gate as a secondary check
  */
 export default function PillGate({ subjectId, onVerified, disabled, ipColor = null }) {
   const videoRef         = useRef(null); // blurred background video
-  const videoSharpRef    = useRef(null); // sharp foreground video (CSS-clipped circle)
-  const cropCanvasRef    = useRef(null); // hidden 224×224 canvas for inference
+  const videoSharpRef    = useRef(null); // sharp foreground video (CSS clip-path circle)
+  const cropCanvasRef    = useRef(null); // hidden 224x224 canvas used for inference
   const overlayCanvasRef = useRef(null); // visible canvas — draws glowing ring only
-  const sessionRef       = useRef(null); // ONNX InferenceSession
+  const modelRef         = useRef(null); // tf.LayersModel
   const metaRef          = useRef(null); // class_map.json { idx_to_class }
   const rafRef           = useRef(null); // requestAnimationFrame handle
   const streamRef        = useRef(null); // MediaStream reference
-  const lastLoggedRef    = useRef("");   // deduplicates logEvent calls
-  const currentStatusRef = useRef("idle"); // committed display state
+  const lastLoggedRef    = useRef("");   // deduplicates repeated logEvent calls
+  const currentStatusRef = useRef("idle");
 
-  // Per-class stable frame counters — all three debounce independently
+  // Per-class stable frame counters
   const stableIpRef         = useRef(0);
   const stableBackgroundRef = useRef(0);
   const stableWrongRef      = useRef(0);
@@ -95,10 +82,13 @@ export default function PillGate({ subjectId, onVerified, disabled, ipColor = nu
 
     async function init() {
       try {
-        // Load ONNX model (WASM backend — works in all browsers, no WebGL required)
-        sessionRef.current = await ort.InferenceSession.create(MODEL_URL, {
-          executionProviders: ["wasm"]
-        });
+        // Load TensorFlow.js LayersModel (exported by training/train.py)
+        modelRef.current = await tf.loadLayersModel(MODEL_URL);
+
+        // Warm up the model — first inference is always slow due to WASM JIT
+        const warmup = tf.zeros([1, 224, 224, 3]);
+        modelRef.current.predict(warmup).dispose();
+        warmup.dispose();
 
         // Load class index map
         const metaRes = await fetch(META_URL);
@@ -142,12 +132,13 @@ export default function PillGate({ subjectId, onVerified, disabled, ipColor = nu
       cancelled = true;
       cancelAnimationFrame(rafRef.current);
       streamRef.current?.getTracks().forEach((t) => t.stop());
+      // Clean up TF tensors on unmount
+      modelRef.current?.dispose();
     };
   }, []);
 
   async function logEvent(event, payload = {}) {
     try {
-      // Deduplicate repeated events (e.g. wrong pill held for multiple frames)
       const key = `${event}:${payload.predicted_class || ""}`;
       if (event === "prevented_dosing_error" && lastLoggedRef.current === key) return;
       lastLoggedRef.current = key;
@@ -186,7 +177,7 @@ export default function PillGate({ subjectId, onVerified, disabled, ipColor = nu
 
     ctx.clearRect(0, 0, w, h);
 
-    // Glowing ring only — blur is handled by CSS via the two video elements
+    // Glowing ring only — blur handled by CSS dual-video layers
     ctx.strokeStyle = color;
     ctx.lineWidth   = 4;
     ctx.shadowColor = color;
@@ -201,15 +192,15 @@ export default function PillGate({ subjectId, onVerified, disabled, ipColor = nu
     rafRef.current = requestAnimationFrame(async () => {
       const video      = videoRef.current;
       const cropCanvas = cropCanvasRef.current;
-      const session    = sessionRef.current;
+      const model      = modelRef.current;
       const meta       = metaRef.current;
 
-      if (!video || !cropCanvas || !session || !meta || disabled) {
+      if (!video || !cropCanvas || !model || !meta || disabled) {
         tick();
         return;
       }
 
-      // Crop square ROI from the centre of the live video frame
+      // Crop square ROI from centre of live video frame
       const ctx     = cropCanvas.getContext("2d");
       cropCanvas.width  = 224;
       cropCanvas.height = 224;
@@ -221,12 +212,12 @@ export default function PillGate({ subjectId, onVerified, disabled, ipColor = nu
       const sy      = (vh - roiSize) / 2;
       ctx.drawImage(video, sx, sy, roiSize, roiSize, 0, 0, 224, 224);
 
-      // Run ONNX inference
-      const inputTensor = preprocessCanvas(cropCanvas);
-      const feeds       = { [session.inputNames[0]]: inputTensor };
-      const results     = await session.run(feeds);
-      const logits      = Array.from(results[session.outputNames[0]].data);
-      const probs       = softmax(logits); // model outputs raw logits, not probabilities
+      // Run TF.js inference — tensor lifecycle managed inside canvasToTensor
+      const inputTensor = canvasToTensor(cropCanvas);
+      const outputTensor = modelRef.current.predict(inputTensor);
+      const probs = await outputTensor.data(); // Float32Array of length num_classes
+      inputTensor.dispose();
+      outputTensor.dispose();
 
       const maxProb        = Math.max(...probs);
       const predIdx        = probs.indexOf(maxProb);
@@ -234,14 +225,14 @@ export default function PillGate({ subjectId, onVerified, disabled, ipColor = nu
 
       setConfidence(Math.round(maxProb * 100));
 
-      // Optional hue gate — overrides "ip" prediction if pixel color doesn't match
+      // Optional hue gate — overrides "ip" if pixel colour doesn't match ipColor prop
       let classVote = predictedClass;
       if (ipColor && predictedClass === "ip") {
         const detectedColor = getRoiDominantColor(cropCanvas);
         if (detectedColor !== ipColor) classVote = "not_ip";
       }
 
-      // Increment the winning counter, slowly decay the others
+      // Increment winning counter, slowly decay the others
       const confident = maxProb >= (THRESHOLDS[classVote] ?? 0.90);
 
       if (confident && classVote === "ip") {
@@ -257,13 +248,13 @@ export default function PillGate({ subjectId, onVerified, disabled, ipColor = nu
         stableIpRef.current          = Math.max(0, stableIpRef.current - 1);
         stableBackgroundRef.current  = Math.max(0, stableBackgroundRef.current - 1);
       } else {
-        // Below confidence threshold — decay all counters slowly
+        // Below threshold — decay all counters
         stableIpRef.current         = Math.max(0, stableIpRef.current - 1);
         stableBackgroundRef.current = Math.max(0, stableBackgroundRef.current - 1);
         stableWrongRef.current      = Math.max(0, stableWrongRef.current - 1);
       }
 
-      // Commit state only when a counter crosses its threshold
+      // Commit state when counter crosses its threshold
       if (stableIpRef.current >= STABLE.ip) {
         currentStatusRef.current = "good";
       } else if (stableWrongRef.current >= STABLE.not_ip) {
@@ -283,7 +274,6 @@ export default function PillGate({ subjectId, onVerified, disabled, ipColor = nu
         analyzing: "#f59e0b"
       }[committed];
 
-      // Ring redrawn every frame — no stale state
       drawOverlay(overlayColor);
 
       if (committed === "idle") {
@@ -333,7 +323,7 @@ export default function PillGate({ subjectId, onVerified, disabled, ipColor = nu
 
       <div className={`${styles.cameraCard} ${status === "wrong" ? styles.shake : ""}`}>
 
-        {/* Layer 1 — blurred background: CSS filter on native video, no canvas */}
+        {/* Layer 1 — blurred background: CSS filter on native video, no canvas required */}
         <video ref={videoRef} autoPlay playsInline muted
           className={`${styles.video} ${styles.videoBlurred}`} />
 
@@ -355,7 +345,7 @@ export default function PillGate({ subjectId, onVerified, disabled, ipColor = nu
         </div>
       </div>
 
-      {/* Hidden crop canvas used for inference only */}
+      {/* Hidden crop canvas — used for inference only, never shown */}
       <canvas ref={cropCanvasRef} style={{ display: "none" }} />
 
       <div className={styles.feedbackCard}>

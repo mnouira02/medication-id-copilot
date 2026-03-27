@@ -6,9 +6,9 @@
 
 ## Executive Summary
 
-Medication non-adherence in Decentralized Clinical Trials (DCTs) compromises study integrity and costs sponsors millions. This project enforces **Asynchronous Directly Observed Therapy (aDOT)** using a lightweight MobileNetV2 model that runs entirely in the browser via **ONNX Runtime Web (WASM)**.
+Medication non-adherence in Decentralized Clinical Trials (DCTs) compromises study integrity and costs sponsors millions. This project enforces **Asynchronous Directly Observed Therapy (aDOT)** using a lightweight MobileNetV2 model that runs entirely in the browser via **TensorFlow.js**.
 
-The classifier answers exactly one question: **"Is this the investigational product?"** If yes, the ePRO diary unlocks. If not, the UI halts and a `prevented_dosing_error` telemetry event is logged to the backend audit trail. No images, no video, and no facial data ever leave the device.
+The classifier answers exactly one question: **“Is this the investigational product?”** If yes, the ePRO diary unlocks. If not, the UI halts and a `prevented_dosing_error` telemetry event is logged to the backend audit trail. No images, no video, and no facial data ever leave the device.
 
 ---
 
@@ -23,10 +23,10 @@ The classifier answers exactly one question: **"Is this the investigational prod
 │  │           ↓                                 │   │
 │  │  Canvas API → 224×224 ROI Crop              │   │
 │  │           ↓                                 │   │
-│  │  ImageNet Normalisation (mean/std)          │   │
+│  │  Normalise: pixel / 255 → [0, 1]           │   │
 │  │           ↓                                 │   │
-│  │  ONNX Runtime Web — MobileNetV2 WASM        │   │
-│  │  (model.onnx served as a static file)       │   │
+│  │  TensorFlow.js — MobileNetV2 LayersModel    │   │
+│  │  (model.json + shard bins, static files)    │   │
 │  │           ↓                                 │   │
 │  │  Softmax → class: ip / not_ip / background  │   │
 │  │           ↓                                 │   │
@@ -53,7 +53,7 @@ The classifier answers exactly one question: **"Is this the investigational prod
 2. **ePRO diary is locked** — cannot submit without verification
 3. Camera activates with circular ROI overlay (blurred outside, sharp inside)
 4. Patient holds the IP inside the target circle
-5. MobileNetV2 classifies continuously **locally in the browser**
+5. MobileNetV2 classifies continuously **locally in the browser via TensorFlow.js**
 6. `ip` class with confidence ≥ 90% held for 10 consecutive frames → diary **unlocks** ✔️
 7. Patient completes symptom questions and submits
 8. Adherence event sent to backend — **no image, no video, no biometric data**
@@ -65,11 +65,11 @@ The classifier answers exactly one question: **"Is this the investigational prod
 
 | Layer | Technology | Reason |
 |-------|------------|--------|
-| Frontend | Next.js 16 (React) | ePRO state management, component-based diary |
-| Edge AI | ONNX Runtime Web (WASM) | In-browser inference, no server round-trip, no WebGL dependency |
-| Model | MobileNetV2 (3-class) | < 15 MB ONNX, fast on CPU/WASM |
-| Training | PyTorch + torchvision | Fine-tunes on your IP photos, exports to ONNX |
-| Media | WebRTC getUserMedia + Canvas | ROI crop + ImageNet normalisation client-side |
+| Frontend | Next.js (React) | ePRO state management, component-based diary |
+| Edge AI | TensorFlow.js (WebGL + WASM fallback) | In-browser inference, no server round-trip |
+| Model | MobileNetV2 3-class Keras (TFJS export) | < 10 MB, runs at ∼ 30fps on mobile CPU |
+| Training | Python + Keras / TensorFlow | Fine-tunes on your IP photos, exports to TFJS format |
+| Media | WebRTC getUserMedia + Canvas API | ROI crop + normalisation client-side |
 | Backend | Node.js / Express | Lightweight telemetry endpoint only |
 | Logging | SDTM-compatible JSONL | EX domain audit trail |
 
@@ -79,29 +79,30 @@ The classifier answers exactly one question: **"Is this the investigational prod
 
 ```
 medication-id-copilot/
-├── training/                    # Python — run once to produce model.onnx
-│   ├── train.py                 # MobileNetV2 fine-tune (PyTorch) + ONNX export
+├── training/                    # Python — run once to produce the TFJS model
+│   ├── train.py                 # Keras MobileNetV2 fine-tune + TFJS export
 │   ├── capture_tool.py          # Webcam tool to collect your own IP photos
-│   ├── requirements.txt
+│   ├── requirements.txt         # tensorflow, tensorflowjs, scikit-learn
 │   └── data/
 │       ├── ip/                  # ~150+ photos of the investigational product
-│       ├── not_ip/              # ~150+ photos: background, wrong pills, hand, empty
-│       └── background/          # Plain background / empty circle shots
+│       ├── not_ip/              # ~150+ photos: other pills, hand, background
+│       └── background/          # Plain empty-circle / table shots
 ├── frontend/                    # Next.js ePRO application
 │   ├── public/
-│   │   └── model/               # ← Drop your exported model files here
-│   │       ├── model.onnx       # Exported from training/train.py
+│   │   └── model/               # ← Drop exported model files here
+│   │       ├── model.json       # TFJS model topology
+│   │       ├── group1-shard*.bin # TFJS weight shards
 │   │       └── class_map.json   # { "idx_to_class": { "0": "background", ... } }
 │   ├── components/
-│   │   ├── PillGate.jsx         # Camera + ONNX RT inference gate component
+│   │   ├── PillGate.jsx         # Camera + TF.js inference gate component
 │   │   ├── DiaryForm.jsx        # Locked symptom diary (unlocks after gate)
 │   │   └── ProgressBar.jsx
 │   ├── pages/
 │   │   └── index.jsx
 │   └── styles/
 │       └── PillGate.module.css
-├── backend/                     # Node.js telemetry server
-│   ├── server.js                # Express: /api/log-adherence
+├── backend/                     # Node.js telemetry server (Express)
+│   ├── server.js                # POST /api/log-adherence endpoint
 │   ├── sdtm_logger.js           # SDTM EX domain JSONL writer
 │   └── package.json
 ├── docs/
@@ -116,20 +117,19 @@ medication-id-copilot/
 ## Quickstart
 
 ```bash
-# 1. Train the model (GPU recommended — RTX 2080+ or equivalent)
+# 1. Train the model (CPU or GPU)
 cd training/
 pip install -r requirements.txt
 
-# Collect photos of your IP:
+# Organise your photos:
 # training/data/ip/         ← investigational product
-# training/data/not_ip/     ← other pills, background, hand
-# training/data/background/ ← empty scene
+# training/data/not_ip/     ← other pills, empty hand, table
+# training/data/background/ ← empty scene, circle with nothing
 
 python train.py
-# Outputs: training/model.onnx + frontend/public/model/class_map.json
-
-# Copy model to frontend
-copy model.onnx ..\frontend\public\model\model.onnx
+# Outputs: frontend/public/model/model.json
+#          frontend/public/model/group1-shard*.bin
+#          frontend/public/model/class_map.json
 
 # 2. Start the frontend
 cd ../frontend
@@ -146,13 +146,13 @@ node server.js     # http://localhost:3001
 
 ## Model Training Notes
 
-- **Architecture:** MobileNetV2 pretrained on ImageNet, last 20 layers fine-tuned
+- **Architecture:** Keras MobileNetV2 pretrained on ImageNet, top 30 layers fine-tuned
 - **Classes:** `ip` / `not_ip` / `background`
-- **Augmentation:** Random crop, flip, rotation, brightness/contrast only
-  - Saturation and hue jitter deliberately excluded to preserve colour discrimination
-- **Two-phase training:** Head-only (40 epochs) → fine-tune last 20 layers (40 epochs, early stopping)
-- **Inference:** ONNX exported with `opset_version=12`, loaded via `onnxruntime-web` WASM
-- **Normalisation:** ImageNet mean/std applied client-side before inference
+- **Normalisation:** `rescale=1/255` only — no ImageNet mean/std subtraction
+- **Augmentation:** Random crop, flip, rotation, brightness/contrast
+- **Two-phase training:** Head-only (40 epochs, frozen base) → fine-tune last 30 layers (40 epochs, early stopping)
+- **Export:** `tensorflowjs.converters.save_keras_model` → `model.json` + `.bin` weight shards
+- **Frontend inference:** `tf.loadLayersModel('/model/model.json')` → `model.predict(tensor)` with matching `pixel/255` normalisation
 
 ---
 
