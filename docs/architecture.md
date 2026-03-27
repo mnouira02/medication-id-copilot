@@ -1,38 +1,46 @@
-# System Design Notes — Clinical Trial Medication Compliance Verifier
+# Architecture Decision Log — aDOT Edge AI ePRO
 
-## Design Philosophy
+## Core Design Principle
 
-The core principle is **verified compliance at the point of care**. The system enforces a strict gate: a patient cannot advance past the pill verification step until the correct medication is confirmed by the CNN. No backend logic bypasses this.
+**Zero Data Transfer.** No video frame, image, or biometric data ever leaves the patient's device. The only network call is a cryptographic JSON payload confirming the outcome of the classification.
 
-## Phase-by-Phase Decision Log
+## Why TensorFlow.js (not a server-side API)?
 
-### Phase 1 — SMAQ Questionnaire
-The Simplified Medication Adherence Questionnaire (SMAQ) is a 6-item validated instrument. Responses are captured as structured JSON and written immediately to the SDTM QS domain log. The questionnaire must be completed before the pill verification step is accessible.
+| Approach | Latency | Privacy | HIPAA/GDPR |
+|---|---|---|---|
+| Send image to backend API | 200–1000ms | ❌ PII transmitted | Requires BAA / DPA |
+| Cloud Vision API | 300–1500ms | ❌ PII transmitted | Requires BAA / DPA |
+| TFJS edge inference | <30ms | ✅ Nothing transmitted | No BAA needed |
 
-### Phase 2 — Custom CNN (not a general LLM)
-A closed-world classifier is far more appropriate than a general VLM here because:
-1. The trial protocol defines exactly which pills are valid (2–5 typically)
-2. A ResNet18 classifier trained on those specific pills can achieve >94% accuracy
-3. No external API call, no latency, no hallucination risk, no data privacy concerns
-4. The model is retrained per trial by updating `config/protocol.json` and re-running `train_cnn.py`
+## Why MobileNetV2 (not YOLO or ResNet50)?
 
-### Phase 3 — Ingestion Confirmation (Human-in-the-Loop)
-The CNN verifies the pill is correct but cannot verify ingestion. A mandatory confirmation button forces the patient to declare they have taken the medication. This event is logged to SDTM EX.
+- YOLO requires reliable bounding-box regression — brittle on 2MP blurry images
+- ResNet50 is ~100MB — too large to serve as a static browser asset
+- MobileNetV2 fine-tuned: ~5MB, 30fps on mobile CPU, >95% accuracy on binary IP/not-IP
 
-### Phase 4 — SDTM Logging
-Two domains are written:
-- **EX**: Records treatment name, NDC code, timestamp, and verification method (`WEBCAM_CNN_CLASSIFICATION`)
-- **QS**: Records each SMAQ question response with a UTC timestamp
+## Why Binary Classification (not multi-class)?
 
-These JSONL files can be ingested by any CDISC-compliant EDC (e.g. Medidata Rave, Veeva Vault).
+The system does not need to identify *which* drug it is — the patient already knows their assigned treatment. It only needs to verify: **"Is this the correct study medication?"** Binary classification is simpler, more accurate, and more defensible than a multi-class approach for this problem.
 
-## Failure Modes and Mitigations
+## Why Affordance-Driven ROI (not object detection)?
 
-| Failure Mode | Mitigation |
-|---|---|
-| Wrong pill shown | CNN returns no_match → 400 response → frontend blocks progression |
-| Low confidence prediction | Confidence threshold set to 0.85 — anything below triggers retry |
-| Camera unavailable | Graceful error message; capture button disabled |
-| Model not trained yet | `pill_classifier.py` returns safe placeholder with clear message |
-| Patient skips confirmation | Confirm button only appears after CNN match; SDTM log not written until clicked |
-| API downtime | Frontend catches fetch errors; patient instructed to retry |
+Forcing the user to physically center the pill in the UI circle:
+1. Guarantees the pill dominates the 224×224 crop
+2. Eliminates the need for object detection on blurry consumer cameras
+3. Reduces inference payload by >90% vs. processing the full 1080p frame
+4. Runs at 30fps on mobile without thermal throttling
+
+## Telemetry Payload Design
+
+The backend receives ONLY:
+```json
+{
+  "subject_id": "SUBJ-042",
+  "event": "dose_verified",
+  "dose_verified": true,
+  "confidence": 0.9731,
+  "timestamp": "2026-03-27T11:32:00Z"
+}
+```
+
+No image. No video. No face. The backend enforces a payload size limit of 10KB to make it structurally impossible to submit image data.

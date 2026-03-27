@@ -1,74 +1,73 @@
-# 💊 Clinical Trial Medication Compliance Verifier
+# 💊 Edge AI-Gated ePRO — Asynchronous Directly Observed Therapy (aDOT)
 
-> **A gated ePRO system for clinical trials** — patients complete an adherence questionnaire, verify the correct pill via webcam using a custom-trained CNN, confirm ingestion, and only then advance to the next question. All events are logged in SDTM-compliant format.
+> **A privacy-first, browser-native clinical trial compliance system.** The patient's daily symptom diary is locked behind a computer vision gate that verifies the investigational product directly on the device. No video ever leaves the patient's phone.
 
 ---
 
 ## Executive Summary
 
-Medication non-compliance is one of the leading causes of failed clinical trials. This system enforces **verified medication compliance** at the point of care using a multi-step gated workflow: structured questionnaire → webcam pill verification → ingestion confirmation → SDTM audit log.
+Medication non-adherence in Decentralized Clinical Trials (DCTs) compromises study integrity and costs sponsors millions. This project enforces **Asynchronous Directly Observed Therapy (aDOT)** using a lightweight MobileNetV2 model that runs entirely in the browser via **TensorFlow.js**.
 
-The pill verification layer uses a **custom-trained CNN** (ResNet18 fine-tuned on the NIH C3PI dataset) loaded with the trial's expected medication list from a protocol config file. If the wrong pill is presented, the system **blocks progression** entirely — no skipping, no guessing.
-
----
-
-## Compliance Workflow
-
-```
-┌─────────────────────────────────────────────────────┐
-│  STEP 1: Questionnaire                              │
-│  Patient answers adherence questions (SMAQ-based)   │
-│  e.g. "Did you miss any doses this week?"           │
-└────────────────────┬────────────────────────────────┘
-                     │
-┌────────────────────▼────────────────────────────────┐
-│  STEP 2: Pill Verification (Webcam + CNN)           │
-│  ROI overlay centers pill → 224×224px crop          │
-│  CNN classifies against protocol expected_pill_id   │
-│  ✅ Match → proceed   ❌ No match → BLOCKED         │
-└────────────────────┬────────────────────────────────┘
-                     │
-┌────────────────────▼────────────────────────────────┐
-│  STEP 3: Ingestion Confirmation                     │
-│  Patient confirms: "I have taken the medication"    │
-└────────────────────┬────────────────────────────────┘
-                     │
-┌────────────────────▼────────────────────────────────┐
-│  STEP 4: SDTM Logging                               │
-│  EX domain: exposure event logged with timestamp    │
-│  QS domain: questionnaire responses logged          │
-└─────────────────────────────────────────────────────┘
-                     │
-              Next Question ──► Repeat from STEP 1
-```
+The classifier answers exactly one binary question: **"Is this the investigational product?"** If yes, the ePRO diary unlocks. If not, the UI halts and a `prevented_dosing_error` telemetry event is logged to the backend audit trail. No images, no video, and no facial data ever leave the device.
 
 ---
 
 ## System Architecture
 
-| Layer | Component | Role |
-|-------|-----------|------|
-| Frontend | HTML5 + Vanilla JS | Gated multi-step UI with progress bar |
-| Edge | HTML5 Canvas API | Real-time video crop (224×224 ROI) |
-| Backend | Python FastAPI | Orchestration, session state, SDTM logging |
-| AI | Custom CNN (ResNet18) | Pill classification against protocol list |
-| Training Data | NIH C3PI Dataset | 133k consumer pill images |
-| Protocol Config | `config/protocol.json` | Expected pills per trial visit |
-| Audit | SDTM EX + QS domains | Regulatory-grade compliance logging |
+```
+┌───────────────────────────────────────────────────┐
+│         PATIENT DEVICE (Everything in ⬇️ is local)         │
+│                                                               │
+│  ┌───────────────────────────────────────────┐          │
+│  │  WebRTC Camera Feed (getUserMedia)        │          │
+│  │         ↓                                 │          │
+│  │  Canvas API → 224×224 ROI Crop            │          │
+│  │         ↓                                 │          │
+│  │  TensorFlow.js MobileNetV2 Inference       │          │
+│  │  (model weights served as static files)   │          │
+│  │         ↓                                 │          │
+│  │  Binary Result: IP_DETECTED / NOT_IP      │          │
+│  └───────────────────────────────────────────┘          │
+│          ↓ ONLY this crosses the network ↓                │
+└───────────────────────────────────────────────────┘
+                   ↓
+  { dose_verified: true, subject_id, timestamp, confidence }
+  OR
+  { event: "prevented_dosing_error", subject_id, timestamp }
+                   ↓
+┌─────────────────────┐
+│  Node.js Telemetry   │
+│  /api/log-adherence  │  ← Audit trail for clinical coordinators
+└─────────────────────┘
+```
 
 ---
 
-## AI Architecture — Custom CNN
+## User Flow
 
-This project deliberately **does not use a general-purpose LLM or external API** for pill identification. Instead, it trains a closed-world classifier scoped to the exact medications in the trial protocol.
+1. Patient opens daily diary on phone browser
+2. **ePRO diary is locked** — cannot submit without verification
+3. Camera activates with circular ROI overlay
+4. Patient holds IP inside the target circle
+5. MobileNetV2 classifies continuously at ~30fps **locally**
+6. `IP_DETECTED` with confidence ≥90% → diary **unlocks** ✔️
+7. Patient completes symptom questions and submits
+8. Cryptographic adherence token sent to backend — **no image, no video**
+9. If wrong object held: diary stays locked, `prevented_dosing_error` logged ❌
 
-**Why a custom CNN over an LLM?**
-- The model only needs to distinguish between N pills defined in `protocol.json` (typically 2–5)
-- Closed-world classification is far more reliable than open-ended VLM guessing
-- No API key, no latency, no hallucination risk
-- The model can be re-trained per trial with zero code changes
+---
 
-**Architecture**: ResNet18 pretrained on ImageNet, final FC layer replaced with `N` output classes matching the protocol pill list. Fine-tuned on NIH C3PI consumer-grade images filtered to trial medications.
+## Technology Stack
+
+| Layer | Technology | Reason |
+|-------|------------|--------|
+| Frontend | Next.js (React) | ePRO state management, component-based diary |
+| Edge AI | TensorFlow.js (TFJS) | In-browser inference, zero data transfer |
+| Model | MobileNetV2 (binary) | <5MB, 30fps on mobile CPU |
+| Media | WebRTC getUserMedia + Canvas | ROI cropping without server round-trip |
+| Backend | Node.js / Express | Lightweight telemetry endpoint |
+| Training | Python + Keras/TF | Trains on your IP photos, exports to TFJS |
+| Logging | SDTM-compatible JSONL | EX domain audit trail |
 
 ---
 
@@ -76,101 +75,81 @@ This project deliberately **does not use a general-purpose LLM or external API**
 
 ```
 medication-id-copilot/
-├── frontend/
-│   ├── index.html          # Gated multi-step UI: questions → webcam → confirm
-│   ├── app.js              # Step state machine, Canvas ROI, CNN API calls
-│   └── style.css           # Mobile-first dark UI with progress bar
-├── backend/
-│   ├── main.py             # FastAPI: /questionnaire /verify-pill /confirm /log-sdtm
-│   ├── pill_classifier.py  # CNN inference: loads model.pt, returns pill_id + confidence
-│   └── sdtm_logger.py      # SDTM EX + QS domain JSON log writer
-├── model/
-│   ├── cnn_pill_classifier.py  # ResNet18 model definition
-│   └── train_cnn.py            # Training script — NIH C3PI dataset
-├── config/
-│   └── protocol.json       # Trial protocol: expected pills per visit
-├── data/
-│   └── smaq_questions.json # Validated SMAQ adherence questionnaire
+├── training/                    # Python — run once to create the model
+│   ├── train.py                 # MobileNetV2 fine-tune + TFJS export
+│   ├── capture_tool.py          # Webcam tool to collect your own IP photos
+│   ├── requirements.txt         # tensorflow, tensorflowjs, opencv-python
+│   └── data/
+│       ├── ip/                  # Your photos of the investigational product
+│       └── not_ip/              # Background / wrong pills / hand / empty
+├── frontend/                    # Next.js ePRO application
+│   ├── public/
+│   │   └── model/               # ← Drop your exported TFJS model here
+│   │       ├── model.json
+│   │       └── group1-shard1of1.bin
+│   ├── components/
+│   │   ├── PillGate.jsx         # Camera + TFJS inference gate component
+│   │   ├── DiaryForm.jsx        # Locked symptom diary (unlocks after gate)
+│   │   └── ProgressBar.jsx
+│   ├── pages/
+│   │   └── index.jsx            # Main ePRO page
+│   ├── package.json
+│   └── .env.local.example
+├── backend/                     # Node.js telemetry server
+│   ├── server.js                # Express: /api/log-adherence
+│   ├── sdtm_logger.js           # SDTM EX domain JSONL writer
+│   └── package.json
 ├── docs/
-│   ├── architecture.md     # System design decision log
-│   └── sdtm_logging.md     # SDTM EX/QS domain spec
-├── .env.example
-└── requirements.txt
+│   ├── architecture.md
+│   ├── training_guide.md        # Step-by-step: collect photos → train → deploy
+│   └── privacy_compliance.md    # HIPAA/GDPR zero-data-transfer rationale
+└── README.md
 ```
 
 ---
 
-## Getting Started
+## Training Your Own Model
 
-### Prerequisites
-- Python 3.11+
-- PyTorch 2.x (`pip install torch torchvision`)
-- NIH C3PI Dataset (free, public domain)
+See [`docs/training_guide.md`](docs/training_guide.md) for the full step-by-step.
 
-### 1. Download Training Data
+**TL;DR:**
 ```bash
-# NIH C3PI — 133k consumer-grade pill images (public domain)
-wget https://data.lhncbc.nlm.nih.gov/public/Pills/trainingImages.zip
-unzip trainingImages.zip -d data/raw/
-```
-
-### 2. Configure Your Trial Protocol
-Edit `config/protocol.json` with your trial's expected medications:
-```json
-{
-  "trial_id": "TRIAL-001",
-  "visit": "Week 4",
-  "expected_pills": [
-    {"id": "pill_001", "name": "Atorvastatin 20mg", "ndc": "00071-0155"},
-    {"id": "placebo",  "name": "Placebo",           "ndc": "00000-0000"}
-  ]
-}
-```
-
-### 3. Train the CNN
-```bash
-python model/train_cnn.py \
-  --data data/raw/ \
-  --protocol config/protocol.json \
-  --epochs 50 \
-  --output model/model.pt
-```
-
-### 4. Run the System
-```bash
+cd training/
 pip install -r requirements.txt
-cp .env.example .env
-uvicorn backend.main:app --reload
-# Open frontend/index.html in browser
+
+# Step 1: Collect photos of your IP (or use capture_tool.py)
+# training/data/ip/       ← ~150 photos of the investigational product
+# training/data/not_ip/   ← ~150 photos of background, hand, wrong pills
+
+# Step 2: Train + export to TensorFlow.js
+python train.py
+# Outputs: frontend/public/model/model.json + .bin shards
+
+# Step 3: Start the app
+cd ../frontend && npm install && npm run dev
+cd ../backend  && npm install && node server.js
 ```
 
 ---
 
-## SDTM Output
+## Privacy & Regulatory Compliance
 
-Each session writes two SDTM-compliant JSON files:
-
-**EX (Exposure) domain** — records verified medication ingestion:
-```json
-{"STUDYID": "TRIAL-001", "DOMAIN": "EX", "USUBJID": "SUBJ-042",
- "EXTRT": "Atorvastatin 20mg", "EXDOSE": 20, "EXDOSU": "mg",
- "EXSTDTC": "2026-03-27T11:32:00Z", "EXSTAT": "VERIFIED_BY_CNN"}
-```
-
-**QS (Questionnaire) domain** — records adherence responses:
-```json
-{"STUDYID": "TRIAL-001", "DOMAIN": "QS", "USUBJID": "SUBJ-042",
- "QSTEST": "SMAQ1", "QSORRES": "No", "QSDTC": "2026-03-27T11:31:00Z"}
-```
+| Concern | This Architecture |
+|---------|------------------|
+| Patient video storage | ❌ Never stored — inference is local |
+| PII transmission | ❌ Only subject_id + outcome hash sent |
+| HIPAA compliance | ✅ No PHI transmitted or stored server-side |
+| GDPR Article 25 | ✅ Privacy by design — data minimization |
+| Audit trail | ✅ SDTM EX-compatible JSONL on backend |
+| Regulatory grade | Portfolio/research prototype. Production use requires 21 CFR Part 11 validation. |
 
 ---
 
-## Safety & Regulatory Notes
+## Safety Disclaimer
 
-> ⚠️ This is a **portfolio / research project** demonstrating clinical AI architecture patterns. It is not a certified medical device or validated eCOA system. For regulated clinical trials, output must be reviewed by qualified personnel and integrated with a validated EDC system (e.g. Medidata Rave).
+> ⚠️ This is a **portfolio and research prototype** demonstrating clinical AI architecture for Decentralized Clinical Trials. It is not a validated eCOA system. Production deployment in a regulated trial requires 21 CFR Part 11 / ICH E6(R3) GCP validation.
 
 ---
 
 ## License
-
-MIT — see [LICENSE](LICENSE)
+MIT

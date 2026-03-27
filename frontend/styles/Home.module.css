@@ -1,0 +1,54 @@
+.main {
+  max-width: 500px;
+  margin: 0 auto;
+  padding: 1rem;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: #0a0e1a;
+  min-height: 100vh;
+  color: #e8e8e8;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.header { text-align: center; padding-top: 1rem; }
+
+.trialBadge {
+  display: inline-block;
+  background: #1a2a4a;
+  border: 1px solid #2a4a7a;
+  color: #7ab3ff;
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.3rem 0.8rem;
+  border-radius: 20px;
+  margin-bottom: 0.6rem;
+}
+
+h1 { font-size: 1.5rem; font-weight: 700; }
+
+.completeCard {
+  background: #111827;
+  border: 1px solid #1e2a3a;
+  border-radius: 16px;
+  padding: 2.5rem;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+}
+
+.completeIcon { font-size: 3rem; }
+.completeCard p { color: #888; font-size: 0.95rem; }
+
+.sdtmBadge {
+  background: #0a1a2a;
+  border: 1px solid #1a3a5a;
+  color: #4a9eca;
+  font-size: 0.75rem;
+  padding: 0.4rem 0.8rem;
+  border-radius: 8px;
+}
+
+.footer { text-align: center; color: #444; font-size: 0.8rem; padding-bottom: 1rem; }
