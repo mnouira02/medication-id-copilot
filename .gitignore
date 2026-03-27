@@ -1,0 +1,38 @@
+# Environment & Secrets
+.env
+.env.local
+.env.*.local
+
+# Node
+node_modules/
+.next/
+dist/
+build/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+venv/
+.venv/
+pip-log.txt
+
+# Model binaries (PyTorch) — repo uses TFJS .json format only
+*.pt
+*.pth
+*.ckpt
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
